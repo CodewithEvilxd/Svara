@@ -15,8 +15,11 @@ import '../components/showmenu.dart';
 import '../components/timersheet.dart';
 import '../models/datamodel.dart';
 import '../services/offlinemanager.dart';
+import '../services/lyrics.dart';
 import '../screens/features/queuesheet.dart';
+import '../screens/views/artistviewer.dart';
 import '../services/audiohandler.dart';
+import '../services/jamlink.dart';
 import '../services/jiosaavn.dart';
 import '../services/sleeptimer.dart';
 import '../utils/format.dart';
@@ -358,14 +361,18 @@ class FullPlayerScreen extends ConsumerStatefulWidget {
 
 class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
   ArtistDetails? _artistDetails;
+  LyricsResult? _lyrics;
+  List<SongDetail> _relatedSongs = [];
+  bool _lyricsLoading = false;
   final ValueNotifier<bool> _isBioExpanded = ValueNotifier(false);
   final PageController _pageController = PageController();
+  final LyricsService _lyricsService = LyricsService();
+  final JamLinkService _jamLinkService = JamLinkService();
 
   @override
   void initState() {
     super.initState();
-    _updateBgColor();
-    _fetchArtistDetails();
+    unawaited(_refreshSongContext());
   }
 
   @override
@@ -373,6 +380,12 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
     _pageController.dispose();
     _isBioExpanded.dispose();
     super.dispose();
+  }
+
+  Future<void> _refreshSongContext() async {
+    await _updateBgColor();
+    await _fetchArtistDetails();
+    await _loadLyrics();
   }
 
   Future<void> _updateBgColor() async {
@@ -387,22 +400,59 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
 
   Future<void> _fetchArtistDetails() async {
     final song = ref.read(currentSongProvider);
-    if (song == null) return;
+    if (song == null) {
+      _artistDetails = null;
+      _relatedSongs = [];
+      if (mounted) setState(() {});
+      return;
+    }
 
-    final artistId = song.contributors.all.first.id;
-    // if (primaryContributors.isEmpty) return;
-
-    // final artistId = primaryContributors.first.id;
-    if (artistId.isEmpty) return;
+    final artistId =
+        song.contributors.primary.isNotEmpty
+            ? song.contributors.primary.first.id
+            : (song.contributors.all.isNotEmpty
+                ? song.contributors.all.first.id
+                : '');
+    if (artistId.isEmpty) {
+      _artistDetails = null;
+      _relatedSongs = [];
+      if (mounted) setState(() {});
+      return;
+    }
 
     final api = SaavnAPI();
     final details = await api.fetchArtistDetailsById(artistId: artistId);
 
-    if (mounted && details != null) {
-      _artistDetails = details;
-      _isBioExpanded.value = false;
+    if (!mounted) return;
+
+    _artistDetails = details;
+    _relatedSongs =
+        details?.topSongs
+            .where((candidate) => candidate.id != song.id)
+            .take(5)
+            .toList() ??
+        [];
+    _isBioExpanded.value = false;
+    setState(() {});
+  }
+
+  Future<void> _loadLyrics() async {
+    final song = ref.read(currentSongProvider);
+    if (song == null) {
+      _lyrics = null;
       if (mounted) setState(() {});
+      return;
     }
+
+    _lyricsLoading = true;
+    if (mounted) setState(() {});
+
+    final result = await _lyricsService.fetchLyrics(song);
+
+    if (!mounted) return;
+    _lyrics = result;
+    _lyricsLoading = false;
+    setState(() {});
   }
 
   String _fmt(Duration d) {
@@ -723,8 +773,264 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
                     },
                   ),
                 ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: OutlinedButton.icon(
+                  onPressed: _openArtistPage,
+                  icon: const Icon(Icons.open_in_new, size: 16),
+                  label: const Text('Open Artist Page'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: BorderSide(color: Colors.white.withAlpha(40)),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openArtistPage() async {
+    final artist = _artistDetails;
+    if (artist == null || artist.id.isEmpty || !mounted) return;
+
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => ArtistViewer(artistId: artist.id)),
+    );
+  }
+
+  Future<void> _shareJamLink(SongDetail song) async {
+    final handler = await ref.read(audioHandlerProvider.future);
+    if (handler.queueSongs.isEmpty) return;
+
+    final link = _jamLinkService.buildJamUri(
+      queue: handler.queueSongs,
+      currentIndex: handler.currentIndex,
+      position: handler.playbackState.value.updatePosition,
+      sourceName: handler.queueSourceName ?? song.title,
+    );
+
+    final shareText = StringBuffer()
+      ..writeln('Join my Svara Jam')
+      ..writeln()
+      ..writeln('Now playing: ${song.title}')
+      ..writeln(
+        'Host: ${username.trim().isNotEmpty ? username.trim() : defaultUsername}',
+      )
+      ..writeln('Open in app: $link');
+
+    await SharePlus.instance.share(ShareParams(text: shareText.toString()));
+  }
+
+  Widget _lyricsWidget() {
+    if (_lyricsLoading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+        child: Center(
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: spotifyGreen,
+          ),
+        ),
+      );
+    }
+
+    final lyrics = _lyrics;
+    if (lyrics == null) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.white.withAlpha(10),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: Colors.white.withAlpha(12)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Lyrics',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (lyrics.instrumental)
+              const Text(
+                'Instrumental track',
+                style: TextStyle(color: Colors.white70, height: 1.5),
+              )
+            else if (lyrics.hasSyncedLyrics)
+              StreamBuilder<Duration>(
+                stream: AudioService.position,
+                builder: (context, snapshot) {
+                  final position = snapshot.data ?? Duration.zero;
+                  final activeIndex = _activeLyricsIndex(
+                    lyrics.syncedLyrics,
+                    position,
+                  );
+                  final visibleLines = [
+                    for (int i = activeIndex; i < lyrics.syncedLyrics.length; i++)
+                      lyrics.syncedLyrics[i],
+                  ].take(4).toList();
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (int i = 0; i < visibleLines.length; i++)
+                        Padding(
+                          padding: EdgeInsets.only(bottom: i == 3 ? 0 : 8),
+                          child: Text(
+                            visibleLines[i].text,
+                            style: TextStyle(
+                              color: i == 0 ? Colors.white : Colors.white54,
+                              fontSize: i == 0 ? 20 : 15,
+                              fontWeight:
+                                  i == 0 ? FontWeight.w700 : FontWeight.w500,
+                              height: 1.35,
+                            ),
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              )
+            else if (lyrics.hasPlainLyrics)
+              Text(
+                lyrics.plainLyrics,
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 14,
+                  height: 1.55,
+                ),
+                maxLines: 8,
+                overflow: TextOverflow.ellipsis,
+              )
+            else
+              const Text(
+                'Lyrics not available for this track.',
+                style: TextStyle(color: Colors.white70, height: 1.5),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  int _activeLyricsIndex(List<LyricsLine> lines, Duration position) {
+    if (lines.isEmpty) return 0;
+
+    for (int i = lines.length - 1; i >= 0; i--) {
+      if (position >= lines[i].timestamp) return i;
+    }
+    return 0;
+  }
+
+  Widget _relatedSongsWidget() {
+    if (_relatedSongs.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.white.withAlpha(8),
+          borderRadius: BorderRadius.circular(22),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Explore This Vibe',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'More songs from this artist mix and nearby recommendations.',
+              style: TextStyle(color: Colors.white54, height: 1.4),
+            ),
+            const SizedBox(height: 14),
+            ..._relatedSongs.map(
+              (track) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () async {
+                    final handler = await ref.read(audioHandlerProvider.future);
+                    await handler.playFromSeedSong(
+                      track,
+                      sourceId: 'mix:${track.id}',
+                      sourceName: '${track.title} Mix',
+                    );
+                  },
+                  child: Row(
+                    children: [
+                      CacheNetWorkImg(
+                        url: track.images.isNotEmpty ? track.images.last.url : '',
+                        width: 48,
+                        height: 48,
+                        fit: BoxFit.cover,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              trimAfterParamText(track.title),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              track.primaryArtists.isNotEmpty
+                                  ? track.primaryArtists
+                                  : track.contributors.all
+                                      .map((artist) => artist.title)
+                                      .toSet()
+                                      .join(', '),
+                              style: const TextStyle(
+                                color: Colors.white54,
+                                fontSize: 13,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(
+                        Icons.play_arrow_rounded,
+                        color: Colors.white70,
+                        size: 26,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1018,6 +1324,11 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
   @override
   Widget build(BuildContext context) {
     final song = ref.watch(currentSongProvider);
+    ref.listen<SongDetail?>(currentSongProvider, (previous, next) {
+      if (next != null && next.id != previous?.id) {
+        unawaited(_refreshSongContext());
+      }
+    });
 
     if (song == null) {
       return const SizedBox.shrink();
@@ -1333,6 +1644,17 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
                                             );
                                           },
                                         ),
+                                        IconButton(
+                                          icon: const Icon(
+                                            Icons.group_outlined,
+                                            color: Colors.white70,
+                                            size: 22,
+                                          ),
+                                          tooltip: "Start Jam",
+                                          onPressed: () async {
+                                            await _shareJamLink(song);
+                                          },
+                                        ),
                                         // queue & share
                                         IconButton(
                                           icon: Image.asset(
@@ -1442,6 +1764,8 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
                                 ],
                               ),
                             ),
+                            _lyricsWidget(),
+                            _relatedSongsWidget(),
                             if (_artistDetails != null) ...[
                               _artistInfoWidget(),
                               const SizedBox(height: 24),

@@ -19,6 +19,9 @@ const developerPortfolioUrl = 'https://nishantdev.space';
 const projectRepoUrl = 'https://github.com/codewithevilxd/svara';
 const latestReleaseUrl = 'https://github.com/codewithevilxd/svara/releases/latest';
 const apiBaseUrl = 'https://rf-snowy.vercel.app/';
+const supabaseUrl = 'https://uawdefbniizntkabzrpu.supabase.co';
+const supabasePublishableKey =
+    'sb_publishable_R1RbUieuVKeUcPPYaF8_JQ_trBDSlIY';
 const defaultUsername = 'Nishant';
 
 // tab index

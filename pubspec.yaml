@@ -49,6 +49,7 @@ dependencies:
   disk_space_plus:
   url_launcher:
   image_picker:
+  supabase_flutter:
 
 dev_dependencies:
   flutter_test:

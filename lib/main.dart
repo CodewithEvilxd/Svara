@@ -12,6 +12,7 @@ import 'screens/home.dart';
 import 'screens/library.dart';
 import 'screens/search.dart';
 import 'services/jiosaavn.dart';
+import 'services/jamlink.dart';
 import 'services/systemconfig.dart';
 import 'services/audiohandler.dart';
 import 'services/localnotification.dart';
@@ -37,6 +38,8 @@ class MyApp extends ConsumerStatefulWidget {
 }
 
 class _MyAppState extends ConsumerState<MyApp> {
+  final AppLinks _appLinks = AppLinks();
+  final JamLinkService _jamLinkService = JamLinkService();
   StreamSubscription<Uri>? _linkSubscription;
 
   @override
@@ -52,13 +55,66 @@ class _MyAppState extends ConsumerState<MyApp> {
   }
 
   Future<void> _init() async {
-    // Deep links
-    _linkSubscription = AppLinks().uriLinkStream.listen((uri) {
+    final initialUri = await _appLinks.getInitialLink();
+    _linkSubscription = _appLinks.uriLinkStream.listen((uri) {
       debugPrint('onAppLink: $uri');
+      unawaited(_handleIncomingUri(uri));
     });
-    // Await the audioHandler FutureProvider
+
     await ref.read(audioHandlerProvider.future);
     await saavn.initBaseUrl();
+
+    if (initialUri != null) {
+      unawaited(_handleIncomingUri(initialUri));
+    }
+  }
+
+  Future<void> _handleIncomingUri(Uri uri) async {
+    final jamPayload = _jamLinkService.parse(uri);
+    if (jamPayload == null) return;
+
+    final audioHandler = await ref.read(audioHandlerProvider.future);
+
+    if (jamPayload.queueIds.isNotEmpty) {
+      final queueSongs = await saavn.getSongDetails(ids: jamPayload.queueIds);
+      if (queueSongs.isNotEmpty) {
+        final safeIndex = jamPayload.startIndex.clamp(0, queueSongs.length - 1);
+        await audioHandler.loadQueue(
+          queueSongs,
+          startIndex: safeIndex,
+          sourceId:
+              'jam:${jamPayload.songId.isNotEmpty ? jamPayload.songId : queueSongs[safeIndex].id}',
+          sourceName:
+              jamPayload.sourceName.isNotEmpty
+                  ? '${jamPayload.sourceName} Jam'
+                  : 'Jam Session',
+        );
+        if (jamPayload.positionMs > 0) {
+          await audioHandler.seek(
+            Duration(milliseconds: jamPayload.positionMs),
+          );
+        }
+        return;
+      }
+    }
+
+    if (jamPayload.songId.isEmpty) return;
+
+    final songs = await saavn.getSongDetails(ids: [jamPayload.songId]);
+    if (songs.isEmpty) return;
+
+    await audioHandler.playFromSeedSong(
+      songs.first,
+      sourceId: 'jam:${songs.first.id}',
+      sourceName:
+          jamPayload.sourceName.isNotEmpty
+              ? '${jamPayload.sourceName} Jam'
+              : 'Jam Session',
+    );
+
+    if (jamPayload.positionMs > 0) {
+      await audioHandler.seek(Duration(milliseconds: jamPayload.positionMs));
+    }
   }
 
   @override
