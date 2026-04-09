@@ -6,6 +6,7 @@ import 'package:dynamic_color/dynamic_color.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:page_transition/page_transition.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:toastification/toastification.dart';
 
 import 'screens/home.dart';
@@ -13,6 +14,8 @@ import 'screens/library.dart';
 import 'screens/search.dart';
 import 'services/jiosaavn.dart';
 import 'services/jamlink.dart';
+import 'services/jamsync.dart';
+import 'services/sharelinks.dart';
 import 'services/systemconfig.dart';
 import 'services/audiohandler.dart';
 import 'services/localnotification.dart';
@@ -26,6 +29,10 @@ void main() async {
 
   await initNotifications();
   await SystemUiConfigurator.configure();
+  await Supabase.initialize(
+    url: supabaseUrl,
+    anonKey: supabasePublishableKey,
+  );
 
   runApp(ToastificationWrapper(child: ProviderScope(child: const MyApp())));
 }
@@ -62,6 +69,7 @@ class _MyAppState extends ConsumerState<MyApp> {
     });
 
     await ref.read(audioHandlerProvider.future);
+    ref.read(jamServiceProvider);
     await saavn.initBaseUrl();
 
     if (initialUri != null) {
@@ -71,11 +79,14 @@ class _MyAppState extends ConsumerState<MyApp> {
 
   Future<void> _handleIncomingUri(Uri uri) async {
     final jamPayload = _jamLinkService.parse(uri);
-    if (jamPayload == null) return;
+    if (jamPayload != null && jamPayload.sessionId.isNotEmpty) {
+      await ref.read(jamServiceProvider).joinSession(jamPayload.sessionId);
+      return;
+    }
 
     final audioHandler = await ref.read(audioHandlerProvider.future);
 
-    if (jamPayload.queueIds.isNotEmpty) {
+    if (jamPayload != null && jamPayload.queueIds.isNotEmpty) {
       final queueSongs = await saavn.getSongDetails(ids: jamPayload.queueIds);
       if (queueSongs.isNotEmpty) {
         final safeIndex = jamPayload.startIndex.clamp(0, queueSongs.length - 1);
@@ -98,22 +109,75 @@ class _MyAppState extends ConsumerState<MyApp> {
       }
     }
 
-    if (jamPayload.songId.isEmpty) return;
+    if (jamPayload != null && jamPayload.songId.isNotEmpty) {
+      final songs = await saavn.getSongDetails(ids: [jamPayload.songId]);
+      if (songs.isEmpty) return;
 
-    final songs = await saavn.getSongDetails(ids: [jamPayload.songId]);
-    if (songs.isEmpty) return;
+      await audioHandler.playFromSeedSong(
+        songs.first,
+        sourceId: 'jam:${songs.first.id}',
+        sourceName:
+            jamPayload.sourceName.isNotEmpty
+                ? '${jamPayload.sourceName} Jam'
+                : 'Jam Session',
+      );
 
-    await audioHandler.playFromSeedSong(
-      songs.first,
-      sourceId: 'jam:${songs.first.id}',
-      sourceName:
-          jamPayload.sourceName.isNotEmpty
-              ? '${jamPayload.sourceName} Jam'
-              : 'Jam Session',
-    );
+      if (jamPayload.positionMs > 0) {
+        await audioHandler.seek(Duration(milliseconds: jamPayload.positionMs));
+      }
+      return;
+    }
 
-    if (jamPayload.positionMs > 0) {
-      await audioHandler.seek(Duration(milliseconds: jamPayload.positionMs));
+    final sharedContent = parseSharedContentUri(uri);
+    if (sharedContent == null) return;
+
+    switch (sharedContent.type) {
+      case SharedContentType.song:
+        final songs = await saavn.getSongDetails(
+          ids: sharedContent.id.isNotEmpty ? [sharedContent.id] : null,
+          link: sharedContent.url,
+        );
+        if (songs.isEmpty) return;
+        await audioHandler.playFromSeedSong(
+          songs.first,
+          sourceId: 'share:song:${songs.first.id}',
+          sourceName: 'Shared Song',
+        );
+        return;
+      case SharedContentType.album:
+        final album = await saavn.fetchAlbumById(
+          albumId: sharedContent.id.isNotEmpty ? sharedContent.id : null,
+          link: sharedContent.url.isNotEmpty ? sharedContent.url : null,
+        );
+        if (album == null || album.songs.isEmpty) return;
+        final songs = await saavn.getSongDetails(
+          ids: album.songs.map((song) => song.id).toList(),
+        );
+        if (songs.isEmpty) return;
+        await audioHandler.loadQueue(
+          songs,
+          sourceId: 'share:album:${album.id}',
+          sourceName: album.title,
+        );
+        return;
+      case SharedContentType.playlist:
+        final playlist = await saavn.fetchPlaylistById(
+          playlistId: sharedContent.id.isNotEmpty ? sharedContent.id : null,
+          link: sharedContent.url.isNotEmpty ? sharedContent.url : null,
+        );
+        if (playlist == null || playlist.songs.isEmpty) return;
+        final songs = await saavn.getSongDetails(
+          ids: playlist.songs.map((song) => song.id).toList(),
+        );
+        if (songs.isEmpty) return;
+        await audioHandler.loadQueue(
+          songs,
+          sourceId: 'share:playlist:${playlist.id}',
+          sourceName: playlist.title,
+        );
+        return;
+      case SharedContentType.artist:
+        return;
     }
   }
 

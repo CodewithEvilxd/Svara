@@ -12,6 +12,7 @@ import '../utils/theme.dart';
 import 'defaultfetcher.dart';
 import '../models/database.dart';
 import '../models/datamodel.dart';
+import 'jamsync.dart';
 import 'offlinemanager.dart';
 import '../services/jiosaavn.dart';
 import '../shared/constants.dart';
@@ -37,7 +38,23 @@ final audioHandlerProvider = FutureProvider<MyAudioHandler>((ref) async {
 
 class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   final Ref ref;
-  final AudioPlayer _player = AudioPlayer();
+  final AudioPlayer _player = AudioPlayer(
+    audioLoadConfiguration: const AudioLoadConfiguration(
+      androidLoadControl: AndroidLoadControl(
+        minBufferDuration: Duration(seconds: 20),
+        maxBufferDuration: Duration(seconds: 60),
+        bufferForPlaybackDuration: Duration(milliseconds: 1200),
+        bufferForPlaybackAfterRebufferDuration: Duration(seconds: 2),
+        prioritizeTimeOverSizeThresholds: true,
+      ),
+      darwinLoadControl: DarwinLoadControl(
+        automaticallyWaitsToMinimizeStalling: true,
+        preferredForwardBufferDuration: Duration(seconds: 30),
+      ),
+    ),
+    useLazyPreparation: false,
+    maxSkipsOnError: 6,
+  );
 
   // shuffle manager
   final ShuffleManager _shuffleManager = ShuffleManager();
@@ -58,6 +75,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
           bufferedPosition: _player.bufferedPosition,
         ),
       );
+      _maybeSyncJamHeartbeat();
     });
 
     _player.processingStateStream.listen((state) async {
@@ -100,6 +118,11 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
     // resume last played song if exists
     _initLastPlayed();
+    ref.read(jamServiceProvider).attachPlaybackBridge(
+      snapshotBuilder: buildJamSyncSnapshot,
+      remoteApplier: applyJamSnapshot,
+      controlRequestHandler: handleJamControlRequest,
+    );
   }
 
   // --- Public getters
@@ -130,6 +153,8 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   static const int _autoplayTriggerRemaining = 2;
   static const int _autoplayBatchSize = 10;
   bool _isAutoplayLoading = false;
+  bool _isApplyingRemoteJamState = false;
+  int _lastJamProgressSyncAtMs = 0;
 
   // --- Shuffle & repeat
 
@@ -158,6 +183,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
     ref.read(shuffleProvider.notifier).state = _shuffleManager.isShuffling;
 
     isShuffleChanging = false;
+    unawaited(_syncJamSession(force: true));
   }
 
   /// Explicitly turn shuffle OFF safely
@@ -175,6 +201,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
       // Notify listeners
       queue.add(_queue.map(songToMediaItem).toList());
       ref.read(shuffleProvider.notifier).state = false;
+      unawaited(_syncJamSession(force: true));
     }
   }
 
@@ -220,25 +247,48 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
   @override
   Future<void> pause() async {
+    if (await _sendJamControlRequestIfGuest(
+      'pause',
+      position: _player.position,
+    )) {
+      return;
+    }
     _isPausedManually = true;
     playbackState.add(playbackState.value.copyWith(playing: false));
     await _player.pause();
     await _player.pause(); // temporary bug need to fix later
+    unawaited(_syncJamSession(force: true));
   }
 
   @override
   Future<void> play() async {
+    if (await _sendJamControlRequestIfGuest(
+      'play',
+      position: _player.position,
+    )) {
+      return;
+    }
     _isPausedManually = false;
     if (_currentIndex < 0 && _queue.isNotEmpty) {
       _currentIndex = 0;
       await _playCurrent();
     } else {
       await _player.play();
+      unawaited(_syncJamSession(force: true));
     }
   }
 
   Future<void> _onSongEnded() async {
     if (_isPausedManually) return;
+    if (_shouldInterceptJamControls) {
+      playbackState.add(
+        playbackState.value.copyWith(
+          playing: false,
+          processingState: AudioProcessingState.completed,
+        ),
+      );
+      return;
+    }
 
     if (_repeat == RepeatMode.one) {
       await _player.seek(Duration.zero);
@@ -332,6 +382,9 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
   @override
   Future<void> skipToNext() async {
+    if (await _sendJamControlRequestIfGuest('next')) {
+      return;
+    }
     if (_queue.isEmpty) return;
 
     if (_repeat == RepeatMode.one) {
@@ -386,6 +439,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
     updated.insert(insertIndex, songToMediaItem(song));
     queue.add(updated);
     await LastQueueStorage.save(_queue, currentIndex: _currentIndex);
+    unawaited(_syncJamSession(force: true));
   }
 
   Future<void> addSongToQueue(SongDetail song) async {
@@ -402,6 +456,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
       ..add(songToMediaItem(song));
     queue.add(updated);
     await LastQueueStorage.save(_queue, currentIndex: _currentIndex);
+    unawaited(_syncJamSession(force: true));
   }
 
   @override
@@ -417,6 +472,9 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
   @override
   Future<void> skipToQueueItem(int index) async {
+    if (await _sendJamControlRequestIfGuest('jump', queueIndex: index)) {
+      return;
+    }
     if (index >= 0 && index < _queue.length) {
       _currentIndex = index;
       _shuffleManager.updateCurrentIndex(index);
@@ -432,13 +490,20 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
   @override
   Future<void> seek(Duration position) async {
+    if (await _sendJamControlRequestIfGuest('seek', position: position)) {
+      return;
+    }
     await _player.seek(position);
     final old = playbackState.value;
     playbackState.add(old.copyWith(updatePosition: position));
+    unawaited(_syncJamSession(force: true));
   }
 
   @override
   Future<void> skipToPrevious() async {
+    if (await _sendJamControlRequestIfGuest('previous')) {
+      return;
+    }
     if (_queue.isEmpty) return;
 
     if (_player.position >= const Duration(seconds: 3)) {
@@ -482,6 +547,9 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   @override
   Future<void> playMediaItem(MediaItem mediaItem) async {
     final idx = _queue.indexWhere((s) => s.id == mediaItem.id);
+    if (await _sendJamControlRequestIfGuest('jump', queueIndex: idx)) {
+      return;
+    }
     if (idx >= 0 && idx != _currentIndex) {
       _currentIndex = idx;
       _shuffleManager.updateCurrentIndex(idx);
@@ -505,6 +573,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
     _shuffleManager.addSong(song);
 
     queue.add(_queue.map(songToMediaItem).toList());
+    unawaited(_syncJamSession(force: true));
   }
 
   String? _queueSourceId;
@@ -512,6 +581,228 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
   String? get queueSourceId => _queueSourceId;
   String? get queueSourceName => _queueSourceName;
+
+  Future<JamSyncSnapshot?> buildJamSyncSnapshot() async {
+    if (_queue.isEmpty || _currentIndex < 0 || _currentIndex >= _queue.length) {
+      return null;
+    }
+
+    return JamSyncSnapshot(
+      sourceName: _queueSourceName ?? currentSong?.title ?? 'Jam Session',
+      hostName: username.trim().isNotEmpty ? username.trim() : defaultUsername,
+      queue: List<SongDetail>.from(_queue),
+      currentIndex: _currentIndex,
+      positionMs: _player.position.inMilliseconds,
+      isPlaying: _player.playing,
+      sentAtMs: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  Future<void> applyJamSnapshot(JamSyncSnapshot snapshot) async {
+    if (snapshot.queue.isEmpty) return;
+
+    _isApplyingRemoteJamState = true;
+    try {
+      final incomingQueue = List<SongDetail>.from(snapshot.queue);
+      final safeIndex = snapshot.currentIndex.clamp(0, incomingQueue.length - 1);
+      final targetSong = incomingQueue[safeIndex];
+      final queueChanged = !_queueHasSameIds(_queue, incomingQueue);
+      final shouldReloadSource =
+          queueChanged ||
+          _currentIndex != safeIndex ||
+          mediaItem.value?.id != targetSong.id;
+
+      _queue = incomingQueue;
+      _currentIndex = safeIndex;
+      _queueSourceId = 'jam:${snapshot.sessionId}';
+      _queueSourceName =
+          snapshot.sourceName.isNotEmpty ? snapshot.sourceName : 'Jam Session';
+
+      _shuffleManager.loadQueue(_queue, currentIndex: _currentIndex);
+      queue.add(_queue.map(songToMediaItem).toList());
+      ref.read(currentSongProvider.notifier).state = targetSong;
+      await LastQueueStorage.save(_queue, currentIndex: _currentIndex);
+
+      if (shouldReloadSource) {
+        await _loadCurrentSource(
+          autoPlay: snapshot.isPlaying,
+          initialPosition: Duration(milliseconds: snapshot.effectivePositionMs),
+          skipCompletedCheck: true,
+        );
+        return;
+      }
+
+      final targetPosition = Duration(milliseconds: snapshot.effectivePositionMs);
+      final driftMs = (_player.position - targetPosition).inMilliseconds.abs();
+      if (driftMs > 1500) {
+        await _player.seek(targetPosition);
+      }
+
+      if (snapshot.isPlaying) {
+        if (!_player.playing) {
+          await _player.play();
+        }
+      } else {
+        if (_player.playing) {
+          await _player.pause();
+        }
+        playbackState.add(
+          playbackState.value.copyWith(
+            playing: false,
+            updatePosition: targetPosition,
+            queueIndex: _currentIndex,
+          ),
+        );
+      }
+    } finally {
+      _isApplyingRemoteJamState = false;
+    }
+  }
+
+  Future<void> handleJamControlRequest(JamControlRequest request) async {
+    switch (request.action) {
+      case 'play':
+        final positionMs = request.positionMs;
+        if (positionMs != null) {
+          await _player.seek(Duration(milliseconds: positionMs));
+        }
+        await play();
+        return;
+      case 'pause':
+        final positionMs = request.positionMs;
+        if (positionMs != null) {
+          final target = Duration(milliseconds: positionMs);
+          if ((_player.position - target).inMilliseconds.abs() > 1200) {
+            await _player.seek(target);
+          }
+        }
+        await pause();
+        return;
+      case 'seek':
+        final positionMs = request.positionMs;
+        if (positionMs != null) {
+          await seek(Duration(milliseconds: positionMs));
+        }
+        return;
+      case 'next':
+        await skipToNext();
+        return;
+      case 'previous':
+        await skipToPrevious();
+        return;
+      case 'jump':
+        final queueIndex = request.queueIndex;
+        if (queueIndex != null) {
+          await skipToQueueItem(queueIndex);
+        }
+        return;
+    }
+  }
+
+  Future<void> _syncJamSession({bool force = false}) async {
+    if (_isApplyingRemoteJamState) return;
+    await ref.read(jamServiceProvider).syncFromPlayback(force: force);
+  }
+
+  void _maybeSyncJamHeartbeat() {
+    if (_isApplyingRemoteJamState ||
+        !_player.playing ||
+        !ref.read(jamSessionProvider).isHost) {
+      return;
+    }
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastJamProgressSyncAtMs < 1200) {
+      return;
+    }
+
+    _lastJamProgressSyncAtMs = now;
+    unawaited(_syncJamSession());
+  }
+
+  bool get _shouldInterceptJamControls {
+    final jamState = ref.read(jamSessionProvider);
+    return jamState.isActive && !jamState.isHost && !_isApplyingRemoteJamState;
+  }
+
+  Future<bool> _sendJamControlRequestIfGuest(
+    String action, {
+    Duration? position,
+    int? queueIndex,
+  }) async {
+    if (!_shouldInterceptJamControls) {
+      return false;
+    }
+
+    await ref.read(jamServiceProvider).sendControlRequest(
+      action,
+      positionMs: position?.inMilliseconds,
+      queueIndex: queueIndex,
+    );
+    return true;
+  }
+
+  bool _queueHasSameIds(List<SongDetail> left, List<SongDetail> right) {
+    if (left.length != right.length) return false;
+    for (int index = 0; index < left.length; index++) {
+      if (left[index].id != right[index].id) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Future<void> _prefetchQueueWindow({int lookAhead = 4}) async {
+    if (_queue.isEmpty) return;
+
+    final start = _currentIndex < 0 ? 0 : _currentIndex;
+    final end = (start + lookAhead).clamp(start, _queue.length).toInt();
+    final ids =
+        _queue
+            .sublist(start, end)
+            .where((song) => song.downloadUrls.isEmpty)
+            .map((song) => song.id)
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList();
+
+    if (ids.isEmpty) return;
+
+    final fetched = await saavn.getSongDetails(ids: ids);
+    if (fetched.isEmpty) return;
+
+    final fetchedMap = {for (final song in fetched) song.id: song};
+    for (int i = 0; i < _queue.length; i++) {
+      final updated = fetchedMap[_queue[i].id];
+      if (updated != null) {
+        _queue[i] = updated;
+      }
+    }
+    queue.add(_queue.map(songToMediaItem).toList());
+  }
+
+  SourceUrl _preferredStreamSource(SongDetail song) {
+    if (song.downloadUrls.isEmpty) {
+      return SourceUrl(quality: 'default', url: song.url);
+    }
+
+    const qualityPriority = <String, int>{
+      '160kbps': 0,
+      '96kbps': 1,
+      '48kbps': 2,
+      '320kbps': 3,
+      '12kbps': 4,
+      'default': 5,
+    };
+
+    final sorted = List<SourceUrl>.from(song.downloadUrls)
+      ..sort((a, b) {
+        final aRank = qualityPriority[a.quality.toLowerCase()] ?? 999;
+        final bRank = qualityPriority[b.quality.toLowerCase()] ?? 999;
+        return aRank.compareTo(bRank);
+      });
+    return sorted.first;
+  }
 
   Future<void> loadQueue(
     List<SongDetail> songs, {
@@ -544,8 +835,13 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
     queue.add(_queue.map(songToMediaItem).toList());
     await LastQueueStorage.save(_queue, currentIndex: _currentIndex);
+    unawaited(_prefetchQueueWindow(lookAhead: 5));
 
-    if (autoPlay) await _playCurrent();
+    if (autoPlay) {
+      await _playCurrent();
+    } else {
+      await _loadCurrentSource(autoPlay: false);
+    }
   }
 
   Future<void> playFromSeedSong(
@@ -604,16 +900,28 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
   // --- Helpers
   Future<void> _playCurrent({bool skipCompletedCheck = false}) async {
+    await _loadCurrentSource(
+      autoPlay: true,
+      skipCompletedCheck: skipCompletedCheck,
+    );
+  }
+
+  Future<void> _loadCurrentSource({
+    bool autoPlay = true,
+    Duration initialPosition = Duration.zero,
+    bool skipCompletedCheck = false,
+  }) async {
     if (_currentIndex < 0 || _currentIndex >= _queue.length) {
       await stop();
       return;
     }
 
     var song = _queue[_currentIndex];
+    unawaited(_prefetchQueueWindow(lookAhead: 5));
 
     // fetch details if missing
     if (song.downloadUrls.isEmpty) {
-      final fetched = await SaavnAPI().getSongDetails(ids: [song.id]);
+      final fetched = await saavn.getSongDetails(ids: [song.id]);
       if (fetched.isNotEmpty) {
         song = fetched.first;
         _queue[_currentIndex] = song;
@@ -623,7 +931,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
     if (song.downloadUrls.isEmpty) {
       info('Playback error, skipping to next song', Severity.warning);
-      if (!skipCompletedCheck) await skipToNext();
+      if (!skipCompletedCheck && autoPlay) await skipToNext();
       return;
     }
 
@@ -633,30 +941,45 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
     try {
       final localPath = offlineManager.getLocalPath(song.id);
+      final streamSource = _preferredStreamSource(song);
 
       if (localPath != null && File(localPath).existsSync()) {
         debugPrint("▶ Playing offline: $localPath");
         await _player.setAudioSource(
           AudioSource.uri(Uri.file(localPath), tag: songToMediaItem(song)),
+          initialPosition: initialPosition,
         );
       } else {
         debugPrint("▶ Playing online: ${song.downloadUrls.last.url}");
         await _player.setAudioSource(
           AudioSource.uri(
-            Uri.parse(song.downloadUrls.last.url),
+            Uri.parse(streamSource.url),
             tag: songToMediaItem(song),
           ),
+          initialPosition: initialPosition,
         );
       }
 
       mediaItem.add(songToMediaItem(song));
-      await _player.play();
-      Future<void>(() async {
-        await _appendAutoplaySongs(seed: song);
-      });
+      if (autoPlay) {
+        await _player.play();
+        Future<void>(() async {
+          await _appendAutoplaySongs(seed: song);
+        });
+      } else {
+        playbackState.add(
+          playbackState.value.copyWith(
+            playing: false,
+            processingState: AudioProcessingState.ready,
+            updatePosition: initialPosition,
+            queueIndex: _currentIndex,
+          ),
+        );
+      }
+      unawaited(_syncJamSession(force: true));
     } catch (e, st) {
       debugPrint("Error loading song: $e\n$st");
-      if (!skipCompletedCheck) await skipToNext();
+      if (!skipCompletedCheck && autoPlay) await skipToNext();
     }
   }
 
@@ -702,6 +1025,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
       queue.add(_queue.map(songToMediaItem).toList());
       await LastQueueStorage.save(_queue, currentIndex: _currentIndex);
+      unawaited(_syncJamSession(force: true));
       return true;
     } catch (e, st) {
       debugPrint('Autoplay append failed: $e\n$st');
@@ -989,7 +1313,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
                 final uri =
                     (local != null && File(local).existsSync())
                         ? Uri.file(local)
-                        : Uri.parse(s.downloadUrls.last.url);
+                        : Uri.parse(_preferredStreamSource(s).url);
                 return AudioSource.uri(uri, tag: songToMediaItem(s));
               }).toList();
 
@@ -1036,7 +1360,7 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
         final uri =
             (localPath != null && File(localPath).existsSync())
                 ? Uri.file(localPath)
-                : Uri.parse(last.downloadUrls.last.url);
+                : Uri.parse(_preferredStreamSource(last).url);
 
         await _player.setAudioSource(
           AudioSource.uri(uri, tag: songToMediaItem(last)),

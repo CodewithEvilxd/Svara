@@ -20,7 +20,9 @@ import '../screens/features/queuesheet.dart';
 import '../screens/views/artistviewer.dart';
 import '../services/audiohandler.dart';
 import '../services/jamlink.dart';
+import '../services/jamsync.dart';
 import '../services/jiosaavn.dart';
+import '../services/sharelinks.dart';
 import '../services/sleeptimer.dart';
 import '../utils/format.dart';
 import '../utils/theme.dart';
@@ -809,11 +811,44 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
     final handler = await ref.read(audioHandlerProvider.future);
     if (handler.queueSongs.isEmpty) return;
 
-    final link = _jamLinkService.buildJamUri(
-      queue: handler.queueSongs,
-      currentIndex: handler.currentIndex,
-      position: handler.playbackState.value.updatePosition,
-      sourceName: handler.queueSourceName ?? song.title,
+    final jamService = ref.read(jamServiceProvider);
+    var jamState = ref.read(jamSessionProvider);
+
+    if (!jamState.isActive) {
+      await jamService.startSession(
+        sourceName: handler.queueSourceName ?? '${song.title} Jam',
+      );
+      jamState = ref.read(jamSessionProvider);
+    } else {
+      await jamService.syncFromPlayback(force: true);
+      jamState = ref.read(jamSessionProvider);
+    }
+
+    if (!jamState.isActive || jamState.sessionId.isEmpty) return;
+
+    final link = _jamLinkService.buildSessionUri(
+      sessionId: jamState.sessionId,
+      shareCode: jamState.shareCode,
+      sourceName:
+          jamState.sourceName.isNotEmpty
+              ? jamState.sourceName
+              : (handler.queueSourceName ?? song.title),
+      hostName:
+          jamState.hostName.isNotEmpty
+              ? jamState.hostName
+              : (username.trim().isNotEmpty ? username.trim() : defaultUsername),
+    );
+    final inviteUrl = _jamLinkService.buildInviteUrl(
+      sessionId: jamState.sessionId,
+      shareCode: jamState.shareCode,
+      sourceName:
+          jamState.sourceName.isNotEmpty
+              ? jamState.sourceName
+              : (handler.queueSourceName ?? song.title),
+      hostName:
+          jamState.hostName.isNotEmpty
+              ? jamState.hostName
+              : (username.trim().isNotEmpty ? username.trim() : defaultUsername),
     );
 
     final shareText = StringBuffer()
@@ -821,9 +856,16 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
       ..writeln()
       ..writeln('Now playing: ${song.title}')
       ..writeln(
-        'Host: ${username.trim().isNotEmpty ? username.trim() : defaultUsername}',
+        'Host: ${jamState.hostName.isNotEmpty ? jamState.hostName : (username.trim().isNotEmpty ? username.trim() : defaultUsername)}',
       )
-      ..writeln('Open in app: $link');
+      ..writeln('Session code: ${jamState.shareCode}')
+      ..writeln('Listeners: ${jamState.participantCount}')
+      ..writeln()
+      ..writeln('Join URL: $inviteUrl')
+      ..writeln('Open in app: $link')
+      ..writeln(
+        'Or open Svara > About > Jam Connect and enter code ${jamState.shareCode}',
+      );
 
     await SharePlus.instance.share(ShareParams(text: shareText.toString()));
   }
@@ -1324,6 +1366,7 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
   @override
   Widget build(BuildContext context) {
     final song = ref.watch(currentSongProvider);
+    final jamState = ref.watch(jamSessionProvider);
     ref.listen<SongDetail?>(currentSongProvider, (previous, next) {
       if (next != null && next.id != previous?.id) {
         unawaited(_refreshSongContext());
@@ -1645,12 +1688,18 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
                                           },
                                         ),
                                         IconButton(
-                                          icon: const Icon(
+                                          icon: Icon(
                                             Icons.group_outlined,
-                                            color: Colors.white70,
+                                            color:
+                                                jamState.isActive
+                                                    ? spotifyGreen
+                                                    : Colors.white70,
                                             size: 22,
                                           ),
-                                          tooltip: "Start Jam",
+                                          tooltip:
+                                              jamState.isActive
+                                                  ? "Share Jam"
+                                                  : "Start Jam",
                                           onPressed: () async {
                                             await _shareJamLink(song);
                                           },
@@ -1672,6 +1721,10 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
                                                     as RenderBox?;
 
                                             final details = StringBuffer();
+                                            final publicUrl =
+                                                normalizeShareableUrl(song.url);
+                                            final appUrl =
+                                                buildContentShareUri(song);
                                             details.writeln(
                                               "Shared from Svara\n",
                                             );
@@ -1701,11 +1754,13 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
                                                 "Year: ${song.year}",
                                               );
                                             }
-                                            if (song.url.isNotEmpty) {
-                                              details.writeln(
-                                                "URL: ${song.url}",
-                                              );
+                                            details.writeln();
+                                            if (publicUrl.isNotEmpty) {
+                                              details.writeln(publicUrl);
                                             }
+                                            details.writeln(
+                                              "Open in Svara: $appUrl",
+                                            );
 
                                             await SharePlus.instance.share(
                                               ShareParams(
@@ -1758,8 +1813,60 @@ class _FullPlayerScreenState extends ConsumerState<FullPlayerScreen> {
                                           },
                                         ),
                                       ],
+                                      ),
                                     ),
-                                  ),
+                                  if (jamState.isActive)
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 20,
+                                      ),
+                                      child: Container(
+                                        width: double.infinity,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 14,
+                                          vertical: 10,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.white.withAlpha(10),
+                                          borderRadius: BorderRadius.circular(
+                                            16,
+                                          ),
+                                          border: Border.all(
+                                            color: Colors.white.withAlpha(18),
+                                          ),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            const Icon(
+                                              Icons.podcasts_outlined,
+                                              color: spotifyGreen,
+                                              size: 18,
+                                            ),
+                                            const SizedBox(width: 10),
+                                            Expanded(
+                                              child: Text(
+                                                '${jamState.participantCount} listening${jamState.sourceName.isNotEmpty ? ' • ${jamState.sourceName}' : ''}',
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                            TextButton(
+                                              onPressed: () async {
+                                                await ref
+                                                    .read(jamServiceProvider)
+                                                    .leaveSession();
+                                              },
+                                              child: const Text('Leave'),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
                                   const SizedBox(height: 45),
                                 ],
                               ),

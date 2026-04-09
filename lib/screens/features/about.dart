@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../components/generalcards.dart';
 import '../../components/snackbar.dart';
+import '../../services/jamlink.dart';
+import '../../services/jamsync.dart';
 import '../../services/systemconfig.dart';
 import '../../shared/constants.dart';
 import '../../utils/theme.dart';
@@ -17,8 +20,11 @@ class AboutPage extends ConsumerStatefulWidget {
 
 class _AboutPageState extends ConsumerState<AboutPage> {
   late ScrollController _scrollController;
+  final TextEditingController _jamConnectController = TextEditingController();
+  final JamLinkService _jamLinkService = JamLinkService();
   bool _isTitleCollapsed = false;
   bool _showUpdateAvailable = true;
+  bool _isJoiningJam = false;
 
   @override
   void initState() {
@@ -36,6 +42,199 @@ class _AboutPageState extends ConsumerState<AboutPage> {
 
     checkForUpdate();
     if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    _jamConnectController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _joinJamFromInput() async {
+    final sessionTarget = _extractJamSessionTarget(_jamConnectController.text);
+    if (sessionTarget.isEmpty) {
+      await info(
+        'Paste a Jam invite link or enter a session code like FED94D.',
+        Severity.warning,
+      );
+      return;
+    }
+
+    setState(() => _isJoiningJam = true);
+    try {
+      await ref.read(jamServiceProvider).joinSession(sessionTarget);
+      if (!mounted) return;
+      _jamConnectController.clear();
+      FocusScope.of(context).unfocus();
+      await info('Jam connected.', Severity.success);
+    } catch (_) {
+      if (!mounted) return;
+      await info('Could not join this Jam invite.', Severity.error);
+    } finally {
+      if (mounted) {
+        setState(() => _isJoiningJam = false);
+      }
+    }
+  }
+
+  String _extractJamSessionTarget(String rawValue) {
+    final trimmed = rawValue.trim();
+    if (trimmed.isEmpty) {
+      return '';
+    }
+
+    final sessionMatch = RegExp(
+      r'(jam-[a-zA-Z0-9-]+)',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (sessionMatch != null) {
+      return sessionMatch.group(1) ?? '';
+    }
+
+    final uriMatch = RegExp(
+      r'((?:https?|svara):\/\/[^\s]+)',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (uriMatch != null) {
+      final candidate = Uri.tryParse(uriMatch.group(1) ?? '');
+      if (candidate != null) {
+        final payload = _jamLinkService.parse(candidate);
+        if (payload != null && payload.sessionId.isNotEmpty) {
+          return payload.sessionId;
+        }
+      }
+    }
+
+    final codeMatch = RegExp(
+      r'(?:session\s*code\s*[:\-]?\s*)?([a-zA-Z0-9]{6})',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (codeMatch != null) {
+      return codeMatch.group(1) ?? '';
+    }
+
+    return trimmed;
+  }
+
+  Widget _buildJamConnectCard(JamSessionState jamState) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(10),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white.withAlpha(14)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Jam Connect',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+              fontSize: 18,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            jamState.isActive
+                ? 'Connected to ${jamState.hostName.isNotEmpty ? jamState.hostName : 'live Jam'} • code ${jamState.shareCode}'
+                : 'Paste a Jam invite link or enter a 6-character session code to join instantly.',
+            style: const TextStyle(
+              color: Colors.white70,
+              height: 1.5,
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _jamConnectController,
+            textCapitalization: TextCapitalization.characters,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: 'Invite link or code like FED94D',
+              hintStyle: const TextStyle(color: Colors.white38),
+              filled: true,
+              fillColor: Colors.black.withAlpha(70),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: 14,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.white.withAlpha(12)),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.white.withAlpha(12)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: const BorderSide(color: spotifyGreen),
+              ),
+            ),
+            onSubmitted: (_) => _joinJamFromInput(),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton(
+                  onPressed: _isJoiningJam ? null : _joinJamFromInput,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: spotifyGreen,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child:
+                      _isJoiningJam
+                          ? const SizedBox(
+                            height: 18,
+                            width: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.black,
+                            ),
+                          )
+                          : const Text(
+                            'Join Jam',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                ),
+              ),
+              if (jamState.shareCode.isNotEmpty) ...[
+                const SizedBox(width: 10),
+                OutlinedButton(
+                  onPressed: () async {
+                    await Clipboard.setData(
+                      ClipboardData(text: jamState.shareCode),
+                    );
+                    await info('Session code copied.', Severity.success);
+                  },
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: BorderSide(color: Colors.white.withAlpha(24)),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: const Text('Copy Code'),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _sectionCard({
@@ -261,6 +460,8 @@ class _AboutPageState extends ConsumerState<AboutPage> {
 
   @override
   Widget build(BuildContext context) {
+    final jamState = ref.watch(jamSessionProvider);
+
     return Scaffold(
       backgroundColor: spotifyBgColor,
       body: CustomScrollView(
@@ -419,6 +620,11 @@ class _AboutPageState extends ConsumerState<AboutPage> {
                       ),
                     ],
                   ),
+                ),
+                const SizedBox(height: 14),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: _buildJamConnectCard(jamState),
                 ),
                 const SizedBox(height: 20),
                 if (isAppUpdateAvailable && _showUpdateAvailable) ...[

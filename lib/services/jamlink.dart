@@ -4,6 +4,7 @@ import '../models/datamodel.dart';
 import '../shared/constants.dart';
 
 class JamLinkPayload {
+  final String sessionId;
   final String songId;
   final List<String> queueIds;
   final int startIndex;
@@ -12,6 +13,7 @@ class JamLinkPayload {
   final String hostName;
 
   const JamLinkPayload({
+    this.sessionId = '',
     required this.songId,
     this.queueIds = const [],
     this.startIndex = 0,
@@ -23,6 +25,39 @@ class JamLinkPayload {
 
 class JamLinkService {
   static const _host = 'jam';
+  static const _inviteHosts = {jamInviteHost, 'www.$jamInviteHost'};
+
+  Uri buildSessionUri({
+    required String sessionId,
+    String? shareCode,
+    String? sourceName,
+    String? hostName,
+  }) {
+    return Uri(
+      scheme: appDeepLinkScheme,
+      host: _host,
+      queryParameters: {
+        'session': sessionId,
+        if ((shareCode ?? '').trim().isNotEmpty) 'code': shareCode!.trim(),
+        if ((sourceName ?? '').trim().isNotEmpty) 'source': sourceName!.trim(),
+        if ((hostName ?? '').trim().isNotEmpty) 'hostName': hostName!.trim(),
+      },
+    );
+  }
+
+  Uri buildInviteUrl({
+    required String sessionId,
+    required String shareCode,
+    String? sourceName,
+    String? hostName,
+  }) {
+    return Uri.https(jamInviteHost, '$jamInvitePathPrefix/${shareCode.trim()}', {
+      'session': sessionId,
+      'code': shareCode.trim(),
+      if ((sourceName ?? '').trim().isNotEmpty) 'source': sourceName!.trim(),
+      if ((hostName ?? '').trim().isNotEmpty) 'hostName': hostName!.trim(),
+    });
+  }
 
   Uri buildJamUri({
     required List<SongDetail> queue,
@@ -54,8 +89,9 @@ class JamLinkService {
   }
 
   JamLinkPayload? parse(Uri uri) {
-    if (uri.scheme != appDeepLinkScheme || uri.host != _host) return null;
+    if (!_isSupportedJamUri(uri)) return null;
 
+    final sessionId = _resolveSessionId(uri);
     final songId = (uri.queryParameters['songId'] ?? '').trim();
     final queueIds =
         (uri.queryParameters['queue'] ?? '')
@@ -64,9 +100,10 @@ class JamLinkService {
             .where((part) => part.isNotEmpty)
             .toList();
 
-    if (songId.isEmpty && queueIds.isEmpty) return null;
+    if (sessionId.isEmpty && songId.isEmpty && queueIds.isEmpty) return null;
 
     return JamLinkPayload(
+      sessionId: sessionId,
       songId: songId,
       queueIds: queueIds,
       startIndex: int.tryParse(uri.queryParameters['index'] ?? '') ?? 0,
@@ -74,5 +111,51 @@ class JamLinkService {
       sourceName: (uri.queryParameters['source'] ?? '').trim(),
       hostName: (uri.queryParameters['hostName'] ?? '').trim(),
     );
+  }
+
+  bool _isSupportedJamUri(Uri uri) {
+    if (uri.scheme == appDeepLinkScheme && uri.host == _host) {
+      return true;
+    }
+
+    if ((uri.scheme == 'http' || uri.scheme == 'https') &&
+        _inviteHosts.contains(uri.host.toLowerCase())) {
+      final segments =
+          uri.pathSegments
+              .map((segment) => segment.trim().toLowerCase())
+              .where((segment) => segment.isNotEmpty)
+              .toList();
+      return segments.length >= 2 &&
+          segments[0] == 'svara' &&
+          segments[1] == 'jam';
+    }
+
+    return false;
+  }
+
+  String _resolveSessionId(Uri uri) {
+    final sessionId = (uri.queryParameters['session'] ?? '').trim();
+    if (sessionId.isNotEmpty) {
+      return sessionId;
+    }
+
+    final code =
+        (uri.queryParameters['code'] ?? _pathCode(uri)).trim().toUpperCase();
+    if (code.isEmpty) {
+      return '';
+    }
+    return 'jam-${code.toLowerCase()}';
+  }
+
+  String _pathCode(Uri uri) {
+    final segments =
+        uri.pathSegments
+            .map((segment) => segment.trim())
+            .where((segment) => segment.isNotEmpty)
+            .toList();
+    if (segments.length < 3) {
+      return '';
+    }
+    return segments.last;
   }
 }

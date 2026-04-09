@@ -15,6 +15,7 @@ import '../models/datamodel.dart';
 import '../services/audiohandler.dart';
 import '../services/jiosaavn.dart';
 import '../services/offlinemanager.dart';
+import '../services/sharelinks.dart';
 import '../shared/constants.dart';
 import '../utils/theme.dart';
 import 'shimmers.dart';
@@ -250,6 +251,8 @@ Future<void> _handleShare(SongMediaItem item) async {
   final details = StringBuffer()..writeln("Shared from Svara\n");
 
   if (item is SongDetail) {
+    final publicUrl = normalizeShareableUrl(item.url);
+    final appUrl = buildContentShareUri(item);
     details
       ..writeln("🎧 Song: ${item.title}")
       ..writeln(
@@ -258,20 +261,30 @@ Future<void> _handleShare(SongMediaItem item) async {
       ..writeln("💿 Album: ${item.albumName ?? item.album}")
       ..writeln("⏱ Duration: ${item.getHumanReadableDuration()}")
       ..writeln("Year: ${item.year ?? 'Unknown'}")
-      ..writeln("Link : ${item.url}");
+      ..writeln()
+      ..writeln(publicUrl)
+      ..writeln("Open in Svara: $appUrl");
   } else if (item is Album) {
+    final publicUrl = normalizeShareableUrl(item.url);
+    final appUrl = buildContentShareUri(item);
     details
       ..writeln("💿 Album: ${item.title}")
       ..writeln("🎤 Artist : ${item.artist}")
       ..writeln("Year: ${item.year}")
-      ..writeln("Link : ${item.url}");
+      ..writeln()
+      ..writeln(publicUrl)
+      ..writeln("Open in Svara: $appUrl");
   } else if (item is Playlist) {
+    final publicUrl = normalizeShareableUrl(item.url);
+    final appUrl = buildContentShareUri(item);
     final count =
         item.songCount ?? (item.songs.isNotEmpty ? item.songs.length : 0);
     details
       ..writeln("🎶 Playlist: ${item.title}")
       ..writeln("📀 Songs: $count")
-      ..writeln("Link : ${item.url}");
+      ..writeln()
+      ..writeln(publicUrl)
+      ..writeln("Open in Svara: $appUrl");
   } else {
     details.writeln(item.title);
   }

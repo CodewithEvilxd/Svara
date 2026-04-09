@@ -11,8 +11,27 @@ import '../shared/serversource.dart';
 
 final saavn = SaavnAPI();
 
+class _CachedResponse {
+  final String body;
+  final int statusCode;
+  final Map<String, String> headers;
+  final DateTime fetchedAt;
+
+  const _CachedResponse({
+    required this.body,
+    required this.statusCode,
+    required this.headers,
+    required this.fetchedAt,
+  });
+}
+
 class SaavnAPI {
   String baseUrl = apiBaseUrl;
+  final Client _client = Client();
+  final Map<String, _CachedResponse> _responseCache = {};
+  final Map<String, Future<Response?>> _inflightRequests = {};
+  static const Duration _defaultTimeout = Duration(seconds: 12);
+  static const Duration _defaultCacheTtl = Duration(minutes: 5);
 
   SaavnAPI() {
     // Set default base URL from current selected server
@@ -35,6 +54,56 @@ class SaavnAPI {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
   };
 
+  Future<Response?> _getResponse(
+    Uri uri, {
+    Duration timeout = _defaultTimeout,
+    Duration cacheTtl = _defaultCacheTtl,
+    bool allowCache = true,
+  }) async {
+    final key = uri.toString();
+    final now = DateTime.now();
+
+    if (allowCache) {
+      final cached = _responseCache[key];
+      if (cached != null && now.difference(cached.fetchedAt) < cacheTtl) {
+        return Response(
+          cached.body,
+          cached.statusCode,
+          headers: cached.headers,
+          request: Request('GET', uri),
+        );
+      }
+    }
+
+    final inflight = _inflightRequests[key];
+    if (inflight != null) return inflight;
+
+    final future = (() async {
+      try {
+        final response = await _client
+            .get(uri, headers: headers)
+            .timeout(timeout);
+        if (allowCache && response.statusCode == 200) {
+          _responseCache[key] = _CachedResponse(
+            body: response.body,
+            statusCode: response.statusCode,
+            headers: response.headers,
+            fetchedAt: now,
+          );
+        }
+        return response;
+      } catch (e) {
+        debugPrint('HTTP GET failed for $key: $e');
+        return null;
+      } finally {
+        _inflightRequests.remove(key);
+      }
+    })();
+
+    _inflightRequests[key] = future;
+    return future;
+  }
+
   Future<SearchPlaylistsResponse?> searchPlaylists({
     required String query,
     int page = 0,
@@ -47,7 +116,8 @@ class SaavnAPI {
     );
 
     try {
-      final response = await get(url, headers: headers);
+      final response = await _getResponse(url);
+      if (response == null) return null;
       if (response.statusCode == 200) {
         final jsonBody = json.decode(response.body);
         if (jsonBody['success'] == true && jsonBody['data'] != null) {
@@ -74,7 +144,8 @@ class SaavnAPI {
     );
 
     try {
-      final response = await get(url, headers: headers);
+      final response = await _getResponse(url);
+      if (response == null) return null;
       if (response.statusCode == 200) {
         final jsonBody = json.decode(response.body);
         if (jsonBody['success'] == true && jsonBody['data'] != null) {
@@ -101,8 +172,9 @@ class SaavnAPI {
     );
 
     try {
-      final response = await get(url, headers: headers);
+      final response = await _getResponse(url);
 
+      if (response == null) return [];
       if (response.statusCode == 200) {
         final jsonBody = json.decode(response.body);
 
@@ -177,7 +249,15 @@ class SaavnAPI {
     ).replace(queryParameters: queryParams);
 
     try {
-      final response = await get(uri, headers: headers);
+      final response = await _getResponse(uri, allowCache: ids != null);
+      if (response == null) {
+        return ids != null
+            ? ids
+                .where((id) => resultMap.containsKey(id))
+                .map((id) => resultMap[id]!)
+                .toList()
+            : resultMap.values.toList();
+      }
       if (response.statusCode == 200) {
         final jsonData = jsonDecode(response.body);
 
@@ -210,13 +290,24 @@ class SaavnAPI {
         : resultMap.values.toList();
   }
 
+  Future<void> prefetchSongDetails(List<String> ids) async {
+    if (ids.isEmpty) return;
+    try {
+      await getSongDetails(ids: ids);
+    } catch (_) {}
+  }
+
   Future<List<String>> getSearchBoxSuggestions({required String query}) async {
     if (query.isEmpty) return [];
     const baseUrl =
         'https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=';
     final Uri link = Uri.parse(baseUrl + query);
     try {
-      final Response response = await get(link, headers: headers);
+      final Response? response = await _getResponse(
+        link,
+        cacheTtl: const Duration(minutes: 15),
+      );
+      if (response == null) return [];
       if (response.statusCode != 200) return [];
       final unescape = HtmlUnescape();
       final List res = (jsonDecode(response.body) as List)[1] as List;
@@ -238,7 +329,8 @@ class SaavnAPI {
     );
 
     try {
-      final response = await get(url, headers: headers);
+      final response = await _getResponse(url);
+      if (response == null) return null;
       if (response.statusCode == 200) {
         final jsonBody = json.decode(response.body);
         if (jsonBody['success'] == true && jsonBody['data'] != null) {
@@ -275,8 +367,9 @@ class SaavnAPI {
     );
 
     try {
-      final response = await get(url, headers: headers);
+      final response = await _getResponse(url);
 
+      if (response == null) return null;
       if (response.statusCode == 200) {
         final jsonBody = json.decode(response.body);
         if (jsonBody['success'] == true && jsonBody['data'] != null) {
@@ -342,8 +435,9 @@ class SaavnAPI {
     ).replace(queryParameters: queryParams);
 
     try {
-      final response = await get(url, headers: headers);
+      final response = await _getResponse(url);
 
+      if (response == null) return null;
       if (response.statusCode == 200) {
         final jsonBody = json.decode(response.body);
         if (jsonBody['success'] == true && jsonBody['data'] != null) {
@@ -377,7 +471,8 @@ class SaavnAPI {
       '$baseUrl/api/search?query=${Uri.encodeComponent(query)}',
     );
     try {
-      final response = await get(url, headers: headers);
+      final response = await _getResponse(url);
+      if (response == null) return null;
       if (response.statusCode == 200) {
         final jsonBody = json.decode(response.body);
         if (jsonBody['success'] == true && jsonBody['data'] != null) {
@@ -428,8 +523,9 @@ class SaavnAPI {
     ).replace(queryParameters: queryParams);
 
     try {
-      final response = await get(url, headers: headers);
+      final response = await _getResponse(url);
 
+      if (response == null) return null;
       if (response.statusCode == 200) {
         final jsonBody = json.decode(response.body);
         if (jsonBody['success'] == true && jsonBody['data'] != null) {

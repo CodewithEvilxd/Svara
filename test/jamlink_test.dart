@@ -45,6 +45,58 @@ SongDetail _song({
 
 void main() {
   group('JamLinkService', () {
+    test('builds and parses a realtime session invite link', () {
+      final service = JamLinkService();
+
+      final uri = service.buildSessionUri(
+        sessionId: 'jam-123456',
+        shareCode: '123456',
+        sourceName: 'Night Drive',
+        hostName: 'Nishant',
+      );
+
+      final parsed = service.parse(uri);
+
+      expect(parsed, isNotNull);
+      expect(parsed!.sessionId, 'jam-123456');
+      expect(parsed.sourceName, 'Night Drive');
+      expect(parsed.hostName, 'Nishant');
+    });
+
+    test('builds and parses a https Jam invite url', () {
+      final service = JamLinkService();
+
+      final uri = service.buildInviteUrl(
+        sessionId: 'jam-fed94d',
+        shareCode: 'FED94D',
+        sourceName: 'Last Played',
+        hostName: 'Nishant',
+      );
+
+      final parsed = service.parse(uri);
+
+      expect(uri.toString(), contains('https://nishantdev.space/svara/jam/FED94D'));
+      expect(parsed, isNotNull);
+      expect(parsed!.sessionId, 'jam-fed94d');
+      expect(parsed.sourceName, 'Last Played');
+      expect(parsed.hostName, 'Nishant');
+    });
+
+    test('parses a Jam invite url when only share code is present', () {
+      final service = JamLinkService();
+
+      final parsed = service.parse(
+        Uri.parse(
+          'https://nishantdev.space/svara/jam/FED94D?source=Last+Played&hostName=Nishant',
+        ),
+      );
+
+      expect(parsed, isNotNull);
+      expect(parsed!.sessionId, 'jam-fed94d');
+      expect(parsed.sourceName, 'Last Played');
+      expect(parsed.hostName, 'Nishant');
+    });
+
     test('builds and parses a jam link round-trip', () {
       final service = JamLinkService();
       final queue = [
