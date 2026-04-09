@@ -60,6 +60,29 @@ if (typeof window !== "undefined") {
   window.__svaraSupabaseClient = supabase;
 }
 const memberStorageKey = "svara-jam-member-id";
+const memberSessionStorageKey = "svara-jam-tab-member-id";
+
+const readStoredMemberId = () => {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const fromSession = window.sessionStorage.getItem(memberSessionStorageKey)?.trim() || "";
+  if (fromSession) {
+    return fromSession;
+  }
+
+  const legacyLocal = window.localStorage.getItem(memberStorageKey)?.trim() || "";
+  return legacyLocal;
+};
+
+const persistMemberId = (memberId: string) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.sessionStorage.setItem(memberSessionStorageKey, memberId);
+};
 
 const normalizeSourceList = (rawValue: unknown): SourceUrl[] => {
   if (!Array.isArray(rawValue)) {
@@ -349,15 +372,16 @@ class JamSyncService {
       return;
     }
 
-    const cached = window.localStorage.getItem(memberStorageKey);
-    if (cached?.trim()) {
-      this.memberId = cached.trim();
+    const cached = readStoredMemberId();
+    if (cached) {
+      this.memberId = cached;
+      persistMemberId(cached);
       return;
     }
 
     const generated = `${Date.now()}${Math.random().toString(16).slice(2, 8)}`;
     this.memberId = generated;
-    window.localStorage.setItem(memberStorageKey, generated);
+    persistMemberId(generated);
   }
 
   async startSession(sourceName?: string) {
@@ -378,9 +402,15 @@ class JamSyncService {
     this.isHost = true;
     this.initialSnapshotReceived = true;
 
-    await this.subscribeToSession(this.sessionId);
-    await this.syncFromPlayback(true);
-    return this.sessionId;
+    try {
+      await this.subscribeToSession(this.sessionId);
+      await this.syncFromPlayback(true);
+      return this.sessionId;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to start Jam.";
+      this.setConnectionError(message);
+      throw error;
+    }
   }
 
   async joinSession(sessionOrCode: string) {
@@ -401,7 +431,13 @@ class JamSyncService {
     this.isHost = false;
     this.initialSnapshotReceived = false;
 
-    await this.subscribeToSession(this.sessionId);
+    try {
+      await this.subscribeToSession(this.sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to join Jam.";
+      this.setConnectionError(message);
+      throw error;
+    }
   }
 
   async leaveSession() {
@@ -777,6 +813,19 @@ class JamSyncService {
       isHost: this.isHost,
       joinedAt: new Date().toISOString(),
     };
+  }
+
+  private setConnectionError(message: string) {
+    useJamStore.getState().setJamState({
+      isActive: false,
+      isHost: false,
+      sessionId: "",
+      shareCode: "",
+      sourceName: this.sourceName,
+      hostName: "",
+      participants: [],
+      errorMessage: message,
+    });
   }
 }
 

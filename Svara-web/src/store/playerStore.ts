@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { SongDetail } from '@/types';
 import { audioService } from '@/services/AudioService';
+import { jamSyncService } from '@/services/jam';
+import { useJamStore } from '@/store/jamStore';
 
 export type RepeatMode = 'NONE' | 'ALL' | 'ONE';
 
@@ -70,6 +72,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   recentlyPlayed: [],
 
   playSong: (song, queueContext) => {
+    const jamState = useJamStore.getState();
+    if (jamState.isActive && !jamState.isHost) {
+      const queueIndex = get().queue.findIndex((queuedSong) => queuedSong.id === song.id);
+      if (queueIndex >= 0) {
+        void jamSyncService.sendControlRequest('jump', { queueIndex });
+        return;
+      }
+    }
+
     let idx = queueContext.findIndex(s => s.id === song.id);
     if (idx === -1) {
        queueContext = [song, ...queueContext];
@@ -96,6 +107,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   togglePlayPause: () => {
     const { isPlaying, currentSong } = get();
     if (!currentSong) return;
+    const jamState = useJamStore.getState();
+    if (jamState.isActive && !jamState.isHost) {
+      void jamSyncService.sendControlRequest(isPlaying ? 'pause' : 'play', {
+        positionMs: Math.max(0, Math.floor(audioService.getCurrentTime() * 1000)),
+      });
+      return;
+    }
     if (isPlaying) {
       audioService.pause();
     } else {
@@ -111,6 +129,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   nextSong: () => {
     const { queue, currentIndex, repeatMode } = get();
     if (queue.length === 0) return;
+    const jamState = useJamStore.getState();
+    if (jamState.isActive && !jamState.isHost) {
+      void jamSyncService.sendControlRequest('next');
+      return;
+    }
 
     if (repeatMode === 'ONE') {
       set({ isPlaying: true });
@@ -142,6 +165,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   prevSong: () => {
      const { queue, currentIndex, repeatMode } = get();
      if (queue.length === 0) return;
+     const jamState = useJamStore.getState();
+     if (jamState.isActive && !jamState.isHost) {
+        void jamSyncService.sendControlRequest('previous');
+        return;
+     }
 
      let prevIndex = currentIndex - 1;
 
@@ -182,6 +210,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     audioService.setVolume(volume);
   },
   seek: (time) => {
+    const jamState = useJamStore.getState();
+    if (jamState.isActive && !jamState.isHost) {
+      void jamSyncService.sendControlRequest('seek', {
+        positionMs: Math.max(0, Math.floor(time * 1000)),
+      });
+      return;
+    }
     set({ seekTo: time });
     audioService.seek(time);
   },

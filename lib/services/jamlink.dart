@@ -25,7 +25,7 @@ class JamLinkPayload {
 
 class JamLinkService {
   static const _host = 'jam';
-  static const _inviteHosts = {jamInviteHost, 'www.$jamInviteHost'};
+  static const _inviteHosts = {jamInviteHost, 'www.nishantdev.space'};
 
   Uri buildSessionUri({
     required String sessionId,

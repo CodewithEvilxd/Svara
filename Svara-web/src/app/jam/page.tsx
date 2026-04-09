@@ -22,29 +22,47 @@ const JamPage = () => {
   const parsedInvite = useMemo(() => parseJamInvite(searchParams), [searchParams]);
 
   useEffect(() => {
-    if (parsedInvite.shareCode) {
-      setInput(parsedInvite.shareCode);
-    }
-  }, [parsedInvite.shareCode]);
-
-  useEffect(() => {
     if (!parsedInvite.sessionId) {
       return;
     }
 
-    void jamSyncService.joinSession(parsedInvite.sessionId);
-    setStatusMessage("Joining shared Jam session...");
+    void (async () => {
+      try {
+        await jamSyncService.joinSession(parsedInvite.sessionId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unable to join Jam session.";
+        setStatusMessage(message);
+      }
+    })();
   }, [parsedInvite.sessionId]);
 
   const joinCurrentInput = async () => {
-    const target = input.trim() || parsedInvite.sessionId || parsedInvite.shareCode;
+    const rawInput = input.trim();
+    let parsedInputSessionId = "";
+
+    if (rawInput) {
+      try {
+        const parsedInput = parseJamInvite(rawInput);
+        parsedInputSessionId = parsedInput.sessionId;
+      } catch {
+        parsedInputSessionId = "";
+      }
+    }
+
+    const target =
+      parsedInputSessionId || rawInput || parsedInvite.sessionId || parsedInvite.shareCode;
     if (!target) {
       setStatusMessage("Enter a session code or open a valid invite link.");
       return;
     }
 
-    await jamSyncService.joinSession(target);
-    setStatusMessage("Jam connected. If the host is already playing, the shared queue will load here.");
+    try {
+      await jamSyncService.joinSession(target);
+      setStatusMessage("Jam connected. If the host is already playing, the shared queue will load here.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to join Jam session.";
+      setStatusMessage(message);
+    }
   };
 
   const shareCode =
@@ -52,6 +70,11 @@ const JamPage = () => {
   const sessionId = jamState.sessionId || parsedInvite.sessionId;
   const hostName = jamState.hostName || parsedInvite.hostName || "Nishant";
   const sourceName = jamState.sourceName || parsedInvite.sourceName || "Jam Session";
+  const inputValue = input || parsedInvite.shareCode;
+  const visibleStatusMessage =
+    statusMessage ||
+    jamState.errorMessage ||
+    (parsedInvite.sessionId ? "Joining shared Jam session..." : "");
   const deepLink =
     sessionId && shareCode
       ? buildJamDeepLink({ sessionId, shareCode, hostName, sourceName })
@@ -82,8 +105,8 @@ const JamPage = () => {
             <div className="mt-3 flex flex-col sm:flex-row gap-3">
               <input
                 id="jam-code"
-                value={input}
-                onChange={(event) => setInput(event.target.value.toUpperCase())}
+                value={inputValue}
+                onChange={(event) => setInput(event.target.value)}
                 placeholder="FED94D or full invite URL"
                 className="flex-1 rounded-2xl border border-white/8 bg-white/6 px-4 py-4 text-white font-bold outline-none placeholder:text-white/30 focus:border-primary"
               />
@@ -143,8 +166,8 @@ const JamPage = () => {
             </div>
           </div>
 
-          {statusMessage ? (
-            <p className="mt-4 text-sm font-bold text-primary">{statusMessage}</p>
+          {visibleStatusMessage ? (
+            <p className="mt-4 text-sm font-bold text-primary">{visibleStatusMessage}</p>
           ) : null}
 
           <div className="mt-10 grid gap-4 md:grid-cols-3">

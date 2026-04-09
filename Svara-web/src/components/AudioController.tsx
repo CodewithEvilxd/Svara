@@ -3,6 +3,7 @@
 import { useEffect } from 'react';
 import { usePlayerStore } from '@/store/playerStore';
 import { audioService } from '@/services/AudioService';
+import { jamSyncService } from '@/services/jam';
 import { SourceUrl } from '@/types';
 import { useJamStore } from '@/store/jamStore';
 
@@ -56,6 +57,19 @@ export default function AudioController() {
     if (!currentSong) return;
 
     if ('mediaSession' in navigator) {
+      const routeJamControl = (action: "play" | "pause" | "previous" | "next" | "seek", seekTime?: number) => {
+        if (!jamState.isActive || jamState.isHost) {
+          return false;
+        }
+
+        void jamSyncService.sendControlRequest(action, {
+          ...(typeof seekTime === "number"
+            ? { positionMs: Math.max(0, Math.floor(seekTime * 1000)) }
+            : {}),
+        });
+        return true;
+      };
+
       navigator.mediaSession.metadata = new MediaMetadata({
         title: currentSong.title || '',
         artist: currentSong.artist || 'Unknown Artist',
@@ -67,17 +81,40 @@ export default function AudioController() {
         })) : []
       });
 
-      navigator.mediaSession.setActionHandler('play', () => audioService.resume());
-      navigator.mediaSession.setActionHandler('pause', () => audioService.pause());
-      navigator.mediaSession.setActionHandler('previoustrack', () => usePlayerStore.getState().prevSong());
-      navigator.mediaSession.setActionHandler('nexttrack', () => usePlayerStore.getState().nextSong());
+      navigator.mediaSession.setActionHandler('play', () => {
+        if (routeJamControl('play', audioService.getCurrentTime())) {
+          return;
+        }
+        audioService.resume();
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        if (routeJamControl('pause', audioService.getCurrentTime())) {
+          return;
+        }
+        audioService.pause();
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        if (routeJamControl('previous')) {
+          return;
+        }
+        usePlayerStore.getState().prevSong();
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        if (routeJamControl('next')) {
+          return;
+        }
+        usePlayerStore.getState().nextSong();
+      });
       navigator.mediaSession.setActionHandler('seekto', (details) => {
         if (details.seekTime !== undefined) {
+          if (routeJamControl('seek', details.seekTime)) {
+            return;
+          }
           audioService.seek(details.seekTime);
         }
       });
     }
-  }, [currentSong]);
+  }, [currentSong, jamState.isActive, jamState.isHost]);
 
   return null; // No hidden <audio> tag needed anymore!
 }

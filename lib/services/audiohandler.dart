@@ -547,7 +547,8 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   @override
   Future<void> playMediaItem(MediaItem mediaItem) async {
     final idx = _queue.indexWhere((s) => s.id == mediaItem.id);
-    if (await _sendJamControlRequestIfGuest('jump', queueIndex: idx)) {
+    if (idx >= 0 &&
+        await _sendJamControlRequestIfGuest('jump', queueIndex: idx)) {
       return;
     }
     if (idx >= 0 && idx != _currentIndex) {
@@ -705,9 +706,11 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   }
 
   void _maybeSyncJamHeartbeat() {
+    final jamState = ref.read(jamSessionProvider);
     if (_isApplyingRemoteJamState ||
         !_player.playing ||
-        !ref.read(jamSessionProvider).isHost) {
+        !jamState.isActive ||
+        !jamState.isHost) {
       return;
     }
 

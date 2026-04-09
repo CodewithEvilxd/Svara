@@ -10,7 +10,19 @@ import { buildJamDeepLink, buildJamInviteUrl, jamSyncService } from "@/services/
 import { useJamStore } from "@/store/jamStore";
 import { useLikesStore } from "@/store/likesStore";
 import { usePlayerStore } from "@/store/playerStore";
+import { SongDetail, SourceUrl } from "@/types";
 import { getSaavnImageUrl } from "@/utils/image";
+
+type ArtistNameRef = {
+  name?: string;
+  title?: string;
+};
+
+type PlayerSongLike = Partial<SongDetail> & {
+  primaryArtists?: string | ArtistNameRef[];
+  singers?: string | ArtistNameRef[];
+  image?: string | SourceUrl[];
+};
 
 const Player = () => {
   const {
@@ -79,7 +91,7 @@ const Player = () => {
     return `${minutes}:${secs.toString().padStart(2, "0")}`;
   };
 
-  const getArtistsString = (song: any) => {
+  const getArtistsString = (song?: PlayerSongLike | null) => {
     if (!song) {
       return "";
     }
@@ -88,7 +100,7 @@ const Player = () => {
     }
     if (Array.isArray(song.primaryArtists)) {
       const names = song.primaryArtists
-        .map((artist: any) => artist.name || artist.title || "")
+        .map((artist) => artist.name || artist.title || "")
         .filter(Boolean);
       if (names.length > 0) {
         return names.join(", ");
@@ -99,12 +111,15 @@ const Player = () => {
       return artistValue;
     }
     if (Array.isArray(artistValue)) {
-      return artistValue.map((artist: any) => artist.name || artist.title || "").join(", ");
+      return artistValue.map((artist) => artist.name || artist.title || "").join(", ");
     }
     return "Unknown Artist";
   };
 
-  const getImageUrl = (item: any) => {
+  const getImageUrl = (item?: PlayerSongLike | null) => {
+    if (!item) {
+      return "/assets/icons/logo.png";
+    }
     if (Array.isArray(item.images) && item.images.length > 0) {
       return item.images[item.images.length - 1].url || item.images[0].url;
     }
@@ -137,6 +152,47 @@ const Player = () => {
   }
 
   const highestResImage = getImageUrl(currentSong);
+  const shouldRouteJamControl = jamState.isActive && !jamState.isHost;
+
+  const handleJamAwarePlayPause = async () => {
+    if (shouldRouteJamControl) {
+      await jamSyncService.sendControlRequest(isPlaying ? "pause" : "play", {
+        positionMs: Math.max(0, Math.floor(currentTime * 1000)),
+      });
+      return;
+    }
+
+    togglePlayPause();
+  };
+
+  const handleJamAwareNext = async () => {
+    if (shouldRouteJamControl) {
+      await jamSyncService.sendControlRequest("next");
+      return;
+    }
+
+    nextSong();
+  };
+
+  const handleJamAwarePrevious = async () => {
+    if (shouldRouteJamControl) {
+      await jamSyncService.sendControlRequest("previous");
+      return;
+    }
+
+    prevSong();
+  };
+
+  const handleJamAwareSeek = async (timeInSeconds: number) => {
+    if (shouldRouteJamControl) {
+      await jamSyncService.sendControlRequest("seek", {
+        positionMs: Math.max(0, Math.floor(timeInSeconds * 1000)),
+      });
+      return;
+    }
+
+    seek(timeInSeconds);
+  };
 
   const handleSongShare = async () => {
     try {
@@ -222,14 +278,14 @@ const Player = () => {
   return (
     <div className="flex h-full w-full items-center justify-between px-2 font-spotify md:px-0">
       <div className="flex min-w-0 flex-1 items-center gap-2 md:flex-none md:gap-4">
-        <div className="relative h-10 w-10 flex-shrink-0 overflow-hidden rounded-md shadow-lg md:h-[52px] md:w-[52px]">
-          <img
+        <div className="relative h-10 w-10 shrink-0 overflow-hidden rounded-md shadow-lg md:h-13 md:w-13">
+          <Image
             src={getSaavnImageUrl(highestResImage, 500)}
             alt={currentSong.title || currentSong.name || "Album art"}
+            fill
+            sizes="52px"
             className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-110"
-            decoding="async"
-            width={52}
-            height={52}
+            unoptimized
           />
         </div>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -242,7 +298,7 @@ const Player = () => {
         </div>
         <button
           onClick={() => toggleLike(currentSong, "song")}
-          className="ml-2 hidden h-8 w-8 flex-shrink-0 items-center justify-center transition-all hover:scale-110 active:scale-90 md:flex"
+          className="ml-2 hidden h-8 w-8 shrink-0 items-center justify-center transition-all hover:scale-110 active:scale-90 md:flex"
         >
           {isLiked(currentSong.id) ? (
             <Image src="/assets/icons/heart.png" alt="Liked" width={18} height={18} className="brightness-110" />
@@ -283,20 +339,24 @@ const Player = () => {
                 }
               />
               {isShuffling ? (
-                <div className="absolute -bottom-1.5 left-1/2 h-[3px] w-[3px] -translate-x-1/2 rounded-full bg-primary shadow-[0_0_8px_rgba(30,215,96,0.6)]" />
+                <div className="absolute -bottom-1.5 left-1/2 h-0.75 w-0.75 -translate-x-1/2 rounded-full bg-primary shadow-[0_0_8px_rgba(30,215,96,0.6)]" />
               ) : null}
             </div>
           </button>
 
           <button
-            onClick={prevSong}
+            onClick={() => {
+              void handleJamAwarePrevious();
+            }}
             className="text-text-subdued transition-all hover:scale-110 hover:text-white active:scale-90"
           >
             <svg role="img" height="20" width="20" viewBox="0 0 16 16" fill="currentColor" className="md:h-4 md:w-4"><path d="M3.3 1a.7.7 0 0 1 .7.7v5.15l9.95-5.744a.7.7 0 0 1 1.05.606v12.575a.7.7 0 0 1-1.05.607L4 9.149V14.3a.7.7 0 0 1-.7.7H1.7a.7.7 0 0 1-.7-.7V1.7a.7.7 0 0 1 .7-.7h1.6z"></path></svg>
           </button>
 
           <button
-            onClick={togglePlayPause}
+            onClick={() => {
+              void handleJamAwarePlayPause();
+            }}
             className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-black shadow-lg transition-all hover:scale-105 active:scale-95 md:h-10 md:w-10"
           >
             {isPlaying ? (
@@ -307,7 +367,9 @@ const Player = () => {
           </button>
 
           <button
-            onClick={nextSong}
+            onClick={() => {
+              void handleJamAwareNext();
+            }}
             className="text-text-subdued transition-all hover:scale-110 hover:text-white active:scale-90"
           >
             <svg role="img" height="20" width="20" viewBox="0 0 16 16" fill="currentColor" className="md:h-4 md:w-4"><path d="M12.7 1a.7.7 0 0 0-.7.7v5.15L2.05 1.107A.7.7 0 0 0 1 1.712v12.575a.7.7 0 0 0 1.05.607L12 9.149V14.3a.7.7 0 0 0 .7.7h1.6a.7.7 0 0 0 .7-.7V1.7a.7.7 0 0 0-.7-.7h-1.6z"></path></svg>
@@ -336,8 +398,8 @@ const Player = () => {
           </button>
         </div>
 
-        <div className="hidden w-full max-w-[500px] items-center gap-2 md:flex">
-          <span className="min-w-[32px] text-right text-[11px] text-text-subdued">
+        <div className="hidden w-full max-w-125 items-center gap-2 md:flex">
+          <span className="min-w-8 text-right text-[11px] text-text-subdued">
             {formatTime(currentTime)}
           </span>
           <div
@@ -348,7 +410,7 @@ const Player = () => {
               const rect = event.currentTarget.getBoundingClientRect();
               const x = event.clientX - rect.left;
               const percent = x / rect.width;
-              seek(percent * duration);
+              void handleJamAwareSeek(percent * duration);
             }}
           >
             <div className="h-1 w-full overflow-hidden rounded-full bg-white/10">
@@ -360,16 +422,16 @@ const Player = () => {
               />
             </div>
           </div>
-          <span className="min-w-[32px] text-[11px] text-text-subdued">{formatTime(duration)}</span>
+          <span className="min-w-8 text-[11px] text-text-subdued">{formatTime(duration)}</span>
         </div>
       </div>
 
-      <div className="hidden w-[180px] items-center justify-end gap-1.5 md:flex md:w-[240px] md:gap-3 lg:w-[340px]">
+      <div className="hidden w-45 items-center justify-end gap-1.5 md:flex md:w-60 md:gap-3 lg:w-85">
         <button
           onClick={() => {
             void handleSongShare();
           }}
-          className="hidden items-center gap-1.5 rounded-full border border-white/10 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-white/70 transition hover:border-white/20 hover:bg-white/[0.06] hover:text-white lg:flex"
+          className="hidden items-center gap-1.5 rounded-full border border-white/10 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-white/70 transition hover:border-white/20 hover:bg-white/6 hover:text-white lg:flex"
           title="Share current song"
         >
           Share
@@ -381,7 +443,7 @@ const Player = () => {
           className={`hidden items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.18em] transition lg:flex ${
             jamState.isActive
               ? "border-primary/50 bg-primary/10 text-primary"
-              : "border-white/10 text-white/70 hover:border-white/20 hover:bg-white/[0.06] hover:text-white"
+              : "border-white/10 text-white/70 hover:border-white/20 hover:bg-white/6 hover:text-white"
           }`}
           title="Start or share Jam"
         >
@@ -411,7 +473,7 @@ const Player = () => {
               }
             />
             {showQueue ? (
-              <div className="absolute -bottom-1.5 left-1/2 h-[3px] w-[3px] -translate-x-1/2 rounded-full bg-primary shadow-[0_0_8px_rgba(30,215,96,0.6)]" />
+              <div className="absolute -bottom-1.5 left-1/2 h-0.75 w-0.75 -translate-x-1/2 rounded-full bg-primary shadow-[0_0_8px_rgba(30,215,96,0.6)]" />
             ) : null}
           </div>
         </button>
@@ -434,14 +496,14 @@ const Player = () => {
               await pipService.enterPiP(image, currentSong.title || currentSong.name, artistName);
             }
           }}
-          className="flex-shrink-0 p-1.5 text-text-subdued transition-all hover:scale-110 hover:text-white active:scale-90"
+          className="shrink-0 p-1.5 text-text-subdued transition-all hover:scale-110 hover:text-white active:scale-90"
           title="Mini Player"
         >
           <svg role="img" height="16" width="16" aria-hidden="true" viewBox="0 0 16 16" fill="currentColor"><path d="M11.848 1H4.152A1.152 1.152 0 0 0 3 2.152v11.696A1.152 1.152 0 0 0 4.152 15h7.696A1.152 1.152 0 0 0 13 13.848V2.152A1.152 1.152 0 0 0 11.848 1zM4 2.152a.152.152 0 0 1 .152-.152h7.696a.152.152 0 0 1 .152.152v11.696a.152.152 0 0 1-.152.152H4.152a.152.152 0 0 1-.152-.152V2.152z"></path><path d="M8 8a1 1 0 1 1-1-1 1 1 0 0 1 1 1z"></path></svg>
         </button>
 
         <div className="group/volume flex w-24 items-center gap-2 md:w-32">
-          <button className="flex-shrink-0 p-1.5 text-text-subdued transition-all hover:scale-110 hover:text-white active:scale-90">
+          <button className="shrink-0 p-1.5 text-text-subdued transition-all hover:scale-110 hover:text-white active:scale-90">
             <Image
               src="/assets/icons/sound.png"
               alt="Volume"
